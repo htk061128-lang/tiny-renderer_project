@@ -3,6 +3,8 @@
 #include <fstream>
 #include <vector>
 
+//여기서 사용되는 함수들은 tgaimage.cpp에서 정의되어 있음.
+
 #pragma pack(push,1)
 struct TGAHeader {
     std::uint8_t  idlength = 0;
@@ -13,16 +15,16 @@ struct TGAHeader {
     std::uint8_t  colormapdepth = 0;
     std::uint16_t x_origin = 0;
     std::uint16_t y_origin = 0;
-    std::uint16_t width = 0;
-    std::uint16_t height = 0;
-    std::uint8_t  bitsperpixel = 0;
+    std::uint16_t width = 0; //이미지의 가로 픽셀 수
+    std::uint16_t height = 0; //이미지의 세로 픽셀 수 
+    std::uint8_t  bitsperpixel = 0; //이미지의 총 픽셀 수.
     std::uint8_t  imagedescriptor = 0;
 };
 #pragma pack(pop)
 
 struct TGAColor {
     std::uint8_t bgra[4] = {0,0,0,0};
-    std::uint8_t bytespp = 4;
+    std::uint8_t bytespp = 4; //픽셀 당 바이트 수. B, G, R, A 각각 8비트 씩 할당 됨. 그래서 총 4바이트.
     std::uint8_t& operator[](const int i) { return bgra[i]; }
     const std::uint8_t& operator[](const int i) const { return bgra[i]; }
 };
