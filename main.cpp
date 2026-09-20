@@ -64,10 +64,10 @@ double signed_triangle_area(int ax, int ay, int bx, int by, int cx, int cy) { //
 }
 
 void triangle(int ax, int ay, int az, int bx, int by, int bz, int cx, int cy, int cz, TGAImage &zbuffer, TGAImage &framebuffer) {
-    int bbminx = std::min(std::min(ax, bx), cx); // bounding box for the triangle
-    int bbminy = std::min(std::min(ay, by), cy); // defined by its top left and bottom right corners
-    int bbmaxx = std::max(std::max(ax, bx), cx);
-    int bbmaxy = std::max(std::max(ay, by), cy);
+    int bbminx = std::max(0, std::min(std::min(ax, bx), cx)); //들어온 값이 음수거나, 화면 크기를 넘을때를 대비해서 무조건 화면안의 좌표만 가지도록 설정함.
+    int bbminy = std::max(0, std::min(std::min(ay, by), cy)); 
+    int bbmaxx = std::min(framebuffer.width() -1, std::max(std::max(ax, bx), cx));
+    int bbmaxy = std::min(framebuffer.height()-1, std::max(std::max(ay, by), cy));
     double total_area = signed_triangle_area(ax, ay, bx, by, cx, cy);
     if (total_area<1) return; // backface culling + discarding triangles that cover less than a pixel
 
@@ -93,6 +93,18 @@ void triangle(int ax, int ay, int az, int bx, int by, int bz, int cx, int cy, in
     }
 }
 
+
+vec4 rot(vec4 v) {
+    constexpr double a = M_PI/6;
+    constexpr mat<4,4> Ry = {{{std::cos(a), 0, std::sin(a), 0}, {0,1,0, 0}, {-std::sin(a), 0, std::cos(a), 0}, {0, 0, 0, 1}}};
+    return Ry*v;
+}
+
+vec4 persp(vec4 v) {
+    constexpr double c = 3.;
+    return v / (1-v.z/c);
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) {
         std::cerr << "Usage: " << argv[0] << " obj/model.obj" << std::endl;
@@ -104,9 +116,9 @@ int main(int argc, char** argv) {
     TGAImage zbuffer(width, height, TGAImage::GRAYSCALE);
 
     for (int i=0; i<model.nfaces(); i++) { // iterate through all triangles
-        auto [ax, ay, az] = project(model.vert(i, 0));
-        auto [bx, by, bz] = project(model.vert(i, 1));
-        auto [cx, cy, cz] = project(model.vert(i, 2));
+        auto [ax, ay, az] = project(persp(rot(model.vert(i, 0))));
+        auto [bx, by, bz] = project(persp(rot(model.vert(i, 1))));
+        auto [cx, cy, cz] = project(persp(rot(model.vert(i, 2))));
         triangle(ax, ay, az, bx, by, bz, cx, cy, cz, zbuffer, framebuffer);
     }
     framebuffer.write_tga_file("framebuffer.tga");
