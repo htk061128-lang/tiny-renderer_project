@@ -29,6 +29,46 @@ constexpr TGAColor red     = {  0,   0, 255, 255};
 constexpr TGAColor blue    = {255, 128,  64, 255};
 constexpr TGAColor yellow  = {  0, 200, 255, 255};
 
+mat<4,4> ModelView, Viewport, Perspective; 
+
+void lookat(const vec3 eye, const vec3 center, const vec3 up) { //ModelView 행렬 초기화 함수. 
+    vec3 n = normalized(eye-center);
+    vec3 l = normalized(cross(up,n));
+    vec3 m = normalized(cross(n, l));
+    ModelView = mat<4,4>{{{l.x,l.y,l.z,0}, {m.x,m.y,m.z,0}, {n.x,n.y,n.z,0}, {0,0,0,1}}} *
+                mat<4,4>{{{1,0,0,-eye.x}, {0,1,0,-eye.y}, {0,0,1,-eye.z}, {0,0,0,1}}};
+}
+
+void perspective(const double f) {
+    Perspective = {{{1,0,0,0}, {0,1,0,0}, {0,0,1,0}, {0,0, -1/f,1}}};
+}
+
+void viewport(const int x, const int y, const int w, const int h) {
+    Viewport = {{{w/2., 0, 0, x+w/2.}, {0, h/2., 0, y+h/2.}, {0,0,1,0}, {0,0,0,1}}};
+}
+
+void rasterize(const vec4 clip[3], std::vector<double> &zbuffer, TGAImage &framebuffer, const TGAColor color) {
+    vec4 ndc[3]    = { clip[0]/clip[0].w, clip[1]/clip[1].w, clip[2]/clip[2].w };                // normalized device coordinates
+    vec2 screen[3] = { (Viewport*ndc[0]).xy(), (Viewport*ndc[1]).xy(), (Viewport*ndc[2]).xy() }; // screen coordinates
+
+    mat<3,3> ABC = {{ {screen[0].x, screen[0].y, 1.}, {screen[1].x, screen[1].y, 1.}, {screen[2].x, screen[2].y, 1.} }};
+    if (ABC.det()<1) return; // backface culling + discarding triangles that cover less than a pixel
+
+    auto [bbminx,bbmaxx] = std::minmax({screen[0].x, screen[1].x, screen[2].x}); // bounding box for the triangle
+    auto [bbminy,bbmaxy] = std::minmax({screen[0].y, screen[1].y, screen[2].y}); // defined by its top left and bottom right corners
+#pragma omp parallel for
+    for (int x=std::max<int>(bbminx, 0); x<=std::min<int>(bbmaxx, framebuffer.width()-1); x++) { // clip the bounding box by the screen
+        for (int y=std::max<int>(bbminy, 0); y<=std::min<int>(bbmaxy, framebuffer.height()-1); y++) {
+            vec3 bc = ABC.invert_transpose() * vec3{static_cast<double>(x), static_cast<double>(y), 1.}; // barycentric coordinates of {x,y} w.r.t the triangle
+            if (bc.x<0 || bc.y<0 || bc.z<0) continue;                                                    // negative barycentric coordinate => the pixel is outside the triangle
+            double z = bc * vec3{ ndc[0].z, ndc[1].z, ndc[2].z };
+            if (z <= zbuffer[x+y*framebuffer.width()]) continue;
+            zbuffer[x+y*framebuffer.width()] = z;
+            framebuffer.set(x, y, color);
+        }
+    }
+}
+
 void line(int ax, int ay, int bx, int by, TGAImage &framebuffer, TGAColor color) {
     bool steep = std::abs(ax-bx) < std::abs(ay-by);
     if (steep) { // if the line is steep, we transpose the image
@@ -111,16 +151,33 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    Model model(argv[1]);
-    TGAImage framebuffer(width, height, TGAImage::RGB);
-    TGAImage zbuffer(width, height, TGAImage::GRAYSCALE);
+    constexpr int width  = 800;    // output image size
+    constexpr int height = 800;
+    constexpr vec3    eye{3,3,6}; // camera position
+    constexpr vec3 center{0,0,0};  // camera direction
+    constexpr vec3     up{0,1,0};  // camera up vector.
 
-    for (int i=0; i<model.nfaces(); i++) { // iterate through all triangles
-        auto [ax, ay, az] = project(persp(rot(model.vert(i, 0))));
-        auto [bx, by, bz] = project(persp(rot(model.vert(i, 1))));
-        auto [cx, cy, cz] = project(persp(rot(model.vert(i, 2))));
-        triangle(ax, ay, az, bx, by, bz, cx, cy, cz, zbuffer, framebuffer);
+    lookat(eye, center, up);                              // build the ModelView   matrix
+    perspective(3.0);                        // build the Perspective matrix. 여기서는 일단 카메라랑 투영되는 스크린과의 거리를 임의로 설정함.
+    viewport(width/16, height/16, width*7/8, height*7/8); // build the Viewport    matrix. 액자 느낌으로 테두리 50픽셀씩 여분을 남기려고 이렇게 초기화 한듯.
+
+    TGAImage framebuffer(width, height, TGAImage::RGB);
+    std::vector<double> zbuffer(width*height, -std::numeric_limits<double>::max());
+
+    for (int m=1; m<argc; m++) { // iterate through all input objects
+        Model model(argv[m]);
+        for (int i=0; i<model.nfaces(); i++) { // iterate through all triangles
+            vec4 clip[3];
+            for (int d : {0,1,2}) {            // assemble the primitive
+                vec4 v = model.vert(i, d);
+                clip[d] = Perspective * ModelView * vec4{v.x, v.y, v.z, 1.}; //일단 ModelView랑 Perspective 적용한다음에 rasterize()함수 호출해서 Viewport 적용함. 
+            }
+            TGAColor rnd;
+            for (int c=0; c<3; c++) rnd[c] = std::rand()%255;
+            rasterize(clip, zbuffer, framebuffer, rnd); // rasterize the primitive
+        }
     }
+
     framebuffer.write_tga_file("framebuffer.tga");
     return 0;
 }
