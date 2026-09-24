@@ -1,180 +1,73 @@
-#include <cmath>
-#include <tuple>
-#include <algorithm>
-#include "geometry.h"
+#include <cstdlib>
+#include "our_gl.h"
 #include "model.h"
-#include "tgaimage.h"
 
-/*
-argc (Argument Count): 프로그램으로 전달된 인자의 총 개수 (정수형 int)
-argv (Argument Vector): 전달된 문자열들의 배열 (char** 또는 char*[])
+extern mat<4,4> ModelView, Perspective; // "OpenGL" state matrices and
+extern std::vector<double> zbuffer;     // the depth buffer
 
-argv[0]: 실행된 프로그램의 실행 파일 이름/경로
-argv[1]: 첫 번째로 넘겨준 실제 인자 값
-*/
+struct RandomShader : IShader {
+    const Model &model; //이 변수들은 이 구조체 밖에서 넣어줌. 이걸 가져다 쓰면 됨.
+    TGAColor color = {};
+    vec3 tri[3];  // triangle in eye coordinates
+    vec3 light_dir;
+    TGAColor base_color = {};
+    int ambient = 30;
 
-//처음에 시작하면 cd tinyrenderer로 파일안으로 들어와야 함. 
-//코드를 실행후 생성된 framebuffer.tga를 framebuffer.png로 변환하는것 까지 한번에 하는 명령어.
-//다른 bash 창에서 명령어: python3 -m http.server 8000 을 실행하고 거기서 png파일 확인 가능.
-//명령어: cmake --build build && build/tinyrenderer && convert framebuffer.tga framebuffer.png
-//cmake --build build && build/tinyrenderer diablo3_pose.obj && convert framebuffer.tga framebuffer.png
+    RandomShader(const Model &m) : model(m) {
+    }
 
-constexpr int width  = 800;
-constexpr int height = 800;
-constexpr int depth = 255; //8비트 기준.
+    virtual vec4 vertex(const int face, const int vert) {
+        vec3 v = model.vert(face, vert);                          // current vertex in object coordinates
+        vec4 gl_Position = ModelView * vec4{v.x, v.y, v.z, 1.};
+        tri[vert] = gl_Position.xyz();                            // in eye coordinates
+        return Perspective * gl_Position;                         // in clip coordinates
+    }
 
-constexpr TGAColor white   = {255, 255, 255, 255}; // attention, BGRA order
-constexpr TGAColor green   = {  0, 255,   0, 255};
-constexpr TGAColor red     = {  0,   0, 255, 255};
-constexpr TGAColor blue    = {255, 128,  64, 255};
-constexpr TGAColor yellow  = {  0, 200, 255, 255};
+    virtual std::pair<bool,TGAColor> fragment(const vec3 bar) const {
+        // 1. 삼각형 두 변의 외적으로 법선 벡터(Normal) 계산
+        // tinyrenderer 버전에 따라 cross() 또는 ^ 연산자 사용
+        vec3 n = normalized(cross(tri[1] - tri[0], tri[2] - tri[0]));
 
-mat<4,4> ModelView, Viewport, Perspective; 
+        // 2. 광원 방향과 내적 (밝기 계산)
+        double intensity = std::max(0.0, n * light_dir);
 
-void lookat(const vec3 eye, const vec3 center, const vec3 up) { //ModelView 행렬 초기화 함수. 
-    vec3 n = normalized(eye-center);
-    vec3 l = normalized(cross(up,n));
-    vec3 m = normalized(cross(n, l));
-    ModelView = mat<4,4>{{{l.x,l.y,l.z,0}, {m.x,m.y,m.z,0}, {n.x,n.y,n.z,0}, {0,0,0,1}}} *
-                mat<4,4>{{{1,0,0,-eye.x}, {0,1,0,-eye.y}, {0,0,1,-eye.z}, {0,0,0,1}}};
-}
-
-void perspective(const double f) {
-    Perspective = {{{1,0,0,0}, {0,1,0,0}, {0,0,1,0}, {0,0, -1/f,1}}};
-}
-
-void viewport(const int x, const int y, const int w, const int h) {
-    Viewport = {{{w/2., 0, 0, x+w/2.}, {0, h/2., 0, y+h/2.}, {0,0,1,0}, {0,0,0,1}}};
-}
-
-void rasterize(const vec4 clip[3], std::vector<double> &zbuffer, TGAImage &framebuffer, const TGAColor color) {
-    vec4 ndc[3]    = { clip[0]/clip[0].w, clip[1]/clip[1].w, clip[2]/clip[2].w };                // normalized device coordinates
-    vec2 screen[3] = { (Viewport*ndc[0]).xy(), (Viewport*ndc[1]).xy(), (Viewport*ndc[2]).xy() }; // screen coordinates
-
-    mat<3,3> ABC = {{ {screen[0].x, screen[0].y, 1.}, {screen[1].x, screen[1].y, 1.}, {screen[2].x, screen[2].y, 1.} }};
-    if (ABC.det()<1) return; // backface culling + discarding triangles that cover less than a pixel
-
-    auto [bbminx,bbmaxx] = std::minmax({screen[0].x, screen[1].x, screen[2].x}); // bounding box for the triangle
-    auto [bbminy,bbmaxy] = std::minmax({screen[0].y, screen[1].y, screen[2].y}); // defined by its top left and bottom right corners
-#pragma omp parallel for
-    for (int x=std::max<int>(bbminx, 0); x<=std::min<int>(bbmaxx, framebuffer.width()-1); x++) { // clip the bounding box by the screen
-        for (int y=std::max<int>(bbminy, 0); y<=std::min<int>(bbmaxy, framebuffer.height()-1); y++) {
-            vec3 bc = ABC.invert_transpose() * vec3{static_cast<double>(x), static_cast<double>(y), 1.}; // barycentric coordinates of {x,y} w.r.t the triangle
-            if (bc.x<0 || bc.y<0 || bc.z<0) continue;                                                    // negative barycentric coordinate => the pixel is outside the triangle
-            double z = bc * vec3{ ndc[0].z, ndc[1].z, ndc[2].z };
-            if (z <= zbuffer[x+y*framebuffer.width()]) continue;
-            zbuffer[x+y*framebuffer.width()] = z;
-            framebuffer.set(x, y, color);
+        // 3. TGAColor는 곱셈 연산자가 없으므로 채널(R, G, B)별로 계산
+        TGAColor c = base_color;
+        for (int i = 0; i < 3; i++) {
+            c[i] = static_cast<std::uint8_t>((base_color[i] * intensity) + ambient);
         }
+        return {false, c};
     }
-}
-
-void line(int ax, int ay, int bx, int by, TGAImage &framebuffer, TGAColor color) {
-    bool steep = std::abs(ax-bx) < std::abs(ay-by);
-    if (steep) { // if the line is steep, we transpose the image
-        std::swap(ax, ay);
-        std::swap(bx, by);
-    }
-    if (ax>bx) { // make it left−to−right
-        std::swap(ax, bx);
-        std::swap(ay, by);
-    }
-    int y = ay;
-    int ierror = 0;
-    for (int x=ax; x<=bx; x++) {
-        if (steep) // if transposed, de−transpose
-            framebuffer.set(y, x, color);
-        else
-            framebuffer.set(x, y, color);
-        ierror += 2 * std::abs(by-ay);
-        if (ierror > bx - ax) {
-            y += by > ay ? 1 : -1;
-            ierror -= 2 * (bx-ax);
-        }
-    }
-}
-
-std::tuple<int,int,int> project(vec4 v) { // First of all, (x,y) is an orthogonal projection of the vector (x,y,z).
-    return { (v.x + 1.) *  width/2,   // Second, since the input models are scaled to have fit in the [-1,1]^3 world coordinates,
-             (v.y + 1.) * height/2, (v.z + 1.0) * depth/2 }; // we want to shift the vector (x,y) and then scale it to span the entire screen.
-}
-
-double signed_triangle_area(int ax, int ay, int bx, int by, int cx, int cy) { //삼각형 ABC의 넓이를 계산하는 함수. 정점들이 A -> B -> C 가 반시계 방향이야 양수로 넓이가 나옴.
-    return .5*((by-ay)*(bx+ax) + (cy-by)*(cx+bx) + (ay-cy)*(ax+cx));
-}
-
-void triangle(int ax, int ay, int az, int bx, int by, int bz, int cx, int cy, int cz, TGAImage &zbuffer, TGAImage &framebuffer) {
-    int bbminx = std::max(0, std::min(std::min(ax, bx), cx)); //들어온 값이 음수거나, 화면 크기를 넘을때를 대비해서 무조건 화면안의 좌표만 가지도록 설정함.
-    int bbminy = std::max(0, std::min(std::min(ay, by), cy)); 
-    int bbmaxx = std::min(framebuffer.width() -1, std::max(std::max(ax, bx), cx));
-    int bbmaxy = std::min(framebuffer.height()-1, std::max(std::max(ay, by), cy));
-    double total_area = signed_triangle_area(ax, ay, bx, by, cx, cy);
-    if (total_area<1) return; // backface culling + discarding triangles that cover less than a pixel
-
-#pragma omp parallel for
-    for (int x=bbminx; x<=bbmaxx; x++) {
-        for (int y=bbminy; y<=bbmaxy; y++) {
-            double alpha = signed_triangle_area(x, y, bx, by, cx, cy) / total_area;
-            double beta  = signed_triangle_area(x, y, cx, cy, ax, ay) / total_area;
-            double gamma = signed_triangle_area(x, y, ax, ay, bx, by) / total_area;
-            if (alpha<0 || beta<0 || gamma<0) continue; // negative barycentric coordinate => the pixel is outside the triangle
-            unsigned char z = static_cast<unsigned char>(alpha * az + beta * bz + gamma * cz);
-            if(z <= zbuffer.get(x, y)[0]) continue; //z값은 카메라에서 가까우면 가까울수록 더 커짐.
-            // 2. 0.0 ~ 1.0 비율로 정규화 (0~255 범위 기준)
-            double t = std::clamp(z / 255.0, 0.0, 1.0);
-
-            // 3. Z값이 클수록 빨간색에 가까워 짐. 
-            unsigned char r = static_cast<unsigned char>(t * 255.0);
-            unsigned char g = 0;
-            unsigned char b = static_cast<unsigned char>((1.0 - t) * 255.0);
-            zbuffer.set(x, y, {z, 0, 0, 0});
-            framebuffer.set(x, y, {b, g, r, 255});
-        }
-    }
-}
-
-
-vec4 rot(vec4 v) {
-    constexpr double a = M_PI/6;
-    constexpr mat<4,4> Ry = {{{std::cos(a), 0, std::sin(a), 0}, {0,1,0, 0}, {-std::sin(a), 0, std::cos(a), 0}, {0, 0, 0, 1}}};
-    return Ry*v;
-}
-
-vec4 persp(vec4 v) {
-    constexpr double c = 3.;
-    return v / (1-v.z/c);
-}
+};
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
+    if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " obj/model.obj" << std::endl;
         return 1;
     }
 
-    constexpr int width  = 800;    // output image size
+    constexpr int width  = 800;      // output image size
     constexpr int height = 800;
-    constexpr vec3    eye{3,3,6}; // camera position
-    constexpr vec3 center{0,0,0};  // camera direction
-    constexpr vec3     up{0,1,0};  // camera up vector.
+    constexpr vec3    eye{-1, 0, 2}; // camera position
+    constexpr vec3 center{ 0, 0, 0}; // camera direction
+    constexpr vec3     up{ 0, 1, 0}; // camera up vector
 
-    lookat(eye, center, up);                              // build the ModelView   matrix
-    perspective(3.0);                        // build the Perspective matrix. 여기서는 일단 카메라랑 투영되는 스크린과의 거리를 임의로 설정함.
-    viewport(width/16, height/16, width*7/8, height*7/8); // build the Viewport    matrix. 액자 느낌으로 테두리 50픽셀씩 여분을 남기려고 이렇게 초기화 한듯.
+    lookat(eye, center, up);                                   // build the ModelView   matrix
+    init_perspective(norm(eye-center));                        // build the Perspective matrix
+    init_viewport(width/16, height/16, width*7/8, height*7/8); // build the Viewport    matrix
+    init_zbuffer(width, height);
+    TGAImage framebuffer(width, height, TGAImage::RGB, {177, 195, 209, 255});
 
-    TGAImage framebuffer(width, height, TGAImage::RGB);
-    std::vector<double> zbuffer(width*height, -std::numeric_limits<double>::max());
-
-    for (int m=1; m<argc; m++) { // iterate through all input objects
-        Model model(argv[m]);
-        for (int i=0; i<model.nfaces(); i++) { // iterate through all triangles
-            vec4 clip[3];
-            for (int d : {0,1,2}) {            // assemble the primitive
-                vec4 v = model.vert(i, d);
-                clip[d] = Perspective * ModelView * vec4{v.x, v.y, v.z, 1.}; //일단 ModelView랑 Perspective 적용한다음에 rasterize()함수 호출해서 Viewport 적용함. 
-            }
-            TGAColor rnd;
-            for (int c=0; c<3; c++) rnd[c] = std::rand()%255;
-            rasterize(clip, zbuffer, framebuffer, rnd); // rasterize the primitive
+    for (int m=1; m<argc; m++) {                    // iterate through all input objects
+        Model model(argv[m]);                       // load the data
+        RandomShader shader(model);
+        for (int f=0; f<model.nfaces(); f++) {      // iterate through all facets
+            shader.base_color = { 100, 100, 100, 100 };
+            shader.light_dir = {0, 0, 1}; //vertex 쉐이더 이후이므로 카메라가 (0, 0, d)에 있는 좌표계 기준 벡터임. 
+            Triangle clip = { shader.vertex(f, 0),  // assemble the primitive
+                              shader.vertex(f, 1),
+                              shader.vertex(f, 2) };
+            rasterize(clip, shader, framebuffer);   // rasterize the primitive
         }
     }
 
